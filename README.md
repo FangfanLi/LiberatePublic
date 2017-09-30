@@ -49,7 +49,7 @@ def runReplay(PcapDirectory, replayName):
 ```
 * If you want to check whether the performance of the replays are the same, you need to uncomment the code that is in the *Beginning of asking the replay analyzer for performance difference* block in the *runReplay* method, the code there compares the performance of this replay against the original one. But remember you need to have a replay_analyzer running on the server in this case.
 
-* Right now, the main analysis script (LiberateAnalysis.py) only dows the differentiation detection, reverse engineering and evasion evaluation.If you want to deploy the LiberateProxy with succeeded evasion technique, please uncomment the *Step 4* block in the *main* method.
+* Right now, the main analysis script (LiberateAnalysis.py) only does differentiation detection, reverse engineering and evasion evaluation. If you want to deploy the LiberateProxy with succeeded evasion technique after the previous analysis steps, please uncomment the *Step 4* block in the *main* method.
 
 How to run:
 
