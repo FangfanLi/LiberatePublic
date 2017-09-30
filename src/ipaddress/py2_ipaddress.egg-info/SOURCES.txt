@@ -1,0 +1,8 @@
+README.rst
+ipaddress.py
+setup.py
+py2_ipaddress.egg-info/PKG-INFO
+py2_ipaddress.egg-info/SOURCES.txt
+py2_ipaddress.egg-info/dependency_links.txt
+py2_ipaddress.egg-info/top_level.txt
+py2_ipaddress.egg-info/zip-safe
