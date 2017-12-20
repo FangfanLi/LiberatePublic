@@ -244,32 +244,32 @@ def runReplay(PcapDirectory, pacmodify, analyzerI):
 
     # ASK the replay analyzer for KS2 result, i.e., analyzerResult
     # replayResult is whether the replay finished, used for testing censorship
-    # Classify_result = (replayResult, analyzerResult)
+    classification = replayResult
 
-    # Give 15s for the server to process the result and insert metrics into the database
-    time.sleep(15)
-    PRINT_ACTION('Fetching analysis result from the analyzer server',0)
-    res = analyzerI.getSingleResult(permaData.id, permaData.historyCount, configs.get('testID'))
-
-    # Check whether results are successfully fetched
-
-
-    if res['success'] == True:
-        # Process result here
-        pres = processResult(res['response'])
-        if pres == 1:
-            PRINT_ACTION('INConclusive Result. Considered as NOT different from Original replay', 0)
-            classification = 'Original'
-        elif pres == 2:
-            PRINT_ACTION('Different from Original replay', 0)
-            classification = 'NotOriginal'
-        else:
-            PRINT_ACTION('NOT Different from Original replay', 0)
-            classification = 'Original'
-    else:
-        # Only use whether the replayResult as classification
-        PRINT_ACTION('\r\n Failed in fetching result ' + res['error'], 0)
-        classification = replayResult
+    # Beginning of asking the replay analyzer for performance difference
+    # time.sleep(15)
+    # PRINT_ACTION('Fetching analysis result from the analyzer server',0)
+    # res = analyzerI.getSingleResult(permaData.id, permaData.historyCount, configs.get('testID'))
+    #
+    # # Check whether results are successfully fetched
+    #
+    #
+    # if res['success'] == True:
+    #     # Process result here
+    #     pres = processResult(res['response'])
+    #     if pres == 1:
+    #         PRINT_ACTION('INConclusive Result. Considered as NOT different from Original replay', 0)
+    #         classification = 'Original'
+    #     elif pres == 2:
+    #         PRINT_ACTION('Different from Original replay', 0)
+    #         classification = 'NotOriginal'
+    #     else:
+    #         PRINT_ACTION('NOT Different from Original replay', 0)
+    #         classification = 'Original'
+    # else:
+    #     # Only use whether the replayResult as classification
+    #     PRINT_ACTION('\r\n Failed in fetching result ' + res['error'], 0)
+    #     classification = replayResult
 
     # TODO Supplement YOUR OWN method to get the classification result here
 

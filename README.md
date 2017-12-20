@@ -39,15 +39,15 @@ python replay_paser.py --pcap_folder=/the/path/to/pcap
 python replay_paser.py --pcap_folder=/the/path/to/pcap --randomPayload=True --pureRandom=True
 ```
 
-* Determine what is the metrics used to determine differentiation. Every replay result will be logged into a file called ReplayLOG.txt in the src/Results/{testname} directory, the metrics include 1. WhetherFinish (True or False, since the replay can be blocked in case of censorship) 2. duration (float, how long the replay takes) 3. ks2 test results (how likely the throughput of this replay and the original replay are from the same distribution, ranging from 0 to 1, where 1 means the distributions are the same). You can also supply you own method (i.e., get account info for zero-rating tests) to get more metrics. Then modify in ClassifierAnalysis.py to determine the classification result of each replay out of those metrics.
+* Determine what is the metrics used to determine differentiation. Some example metrics are 1. Whether the replay is blocked, using *replayResult* the return value from calling *replay_client*, its value is either 'Finish' or 'Block'. 2. Performance analysis, checking whether this replay shows different performance than the original replay (the first replay with unmodified traffic). 3. Use keyboard to type classification result. You can also supply you own method (i.e., get account info for zero-rating tests) to get more metrics. Modify the *runReplay* method in *ClassifierAnalysis.py* to determine the classification result of each replay from those metrics.
 
 ```python
 def runReplay(PcapDirectory, replayName):
 ...
 	# TODO Supplement YOUR OWN method to get the classification result here
-	classify_result = the method of your choice
+	classification = the method of your choice
 ```
-* If you want to check whether the performance of the replays are the same, you need to uncomment the code that is in the *Beginning of asking the replay analyzer for performance difference* block in the *runReplay* method, the code there compares the performance of this replay against the original one. But remember you need to have a replay_analyzer running on the server in this case.
+* If you choose to check whether the performance of the replays are the same, you need to uncomment the code that is in the *Beginning of asking the replay analyzer for performance difference* block in the *runReplay* method, the code there compares the performance of this replay against the original one. But remember you need to have a replay_analyzer running on the server in this case.
 
 * Right now, the main analysis script (LiberateAnalysis.py) only does differentiation detection, reverse engineering and evasion evaluation. If you want to deploy the LiberateProxy with succeeded evasion technique after the previous analysis steps, please uncomment the *Step 4* block in the *main* method.
 
@@ -61,7 +61,7 @@ On server side:
 sudo python replay_server.py --ConfigFile=configs_local.cfg 
 ```
 
-* If you need performance analysis, you need a replay analyzer running at the same time:
+* If you need performance analysis, you need a replay analyzer running at the same time, which will compare the throughput for each replay against the original replay to detect differentiation:
 
 ```
 sudo python replay_analyzer.py --ConfigFile=configs_local.cfg 
