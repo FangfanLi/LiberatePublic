@@ -202,6 +202,8 @@ def runReplay(PcapDirectory, pacmodify, analyzerI, libProxy=None):
     saction = None
     sspec = None
 
+    classification = None
+
     Side, Num, Action, Mspec = pickle.loads(pacmodify)
 
     if Side == 'Client':
@@ -224,60 +226,47 @@ def runReplay(PcapDirectory, pacmodify, analyzerI, libProxy=None):
 
     # print '\r\n Whether Finished', replayResult
 
-    if replayResult < 20:
-        classify_result = 'NOThrottle'
-    else:
-        classify_result = 'Throttle'
+    classification = replayResult
 
-    print '\r\n CLASSIFIED AS ', classify_result
+    print '\r\n CLASSIFIED AS ', classification
     # The period for extracting the classification results
     time.sleep(15)
+
+    # ASK the replay analyzer for throughput analysis result
+    permaData = PermaData()
+    PRINT_ACTION('Fetching analysis result from the analyzer server',0)
+    res = analyzerI.getSingleResult(permaData.id, permaData.historyCount, configs.get('testID'))
+
+    # Check whether results are successfully fetched
+
+
+    if res['success'] == True:
+        # Process result here
+        pres = processResult(res['response'])
+        if pres == 1:
+            PRINT_ACTION('INConclusive Result. Considered as NOT different from Original replay', 0)
+            classification = 'Original'
+        elif pres == 2:
+            PRINT_ACTION('Different from Original replay', 0)
+            classification = 'NotOriginal'
+        else:
+            PRINT_ACTION('NOT Different from Original replay', 0)
+            classification = 'Original'
+    else:
+        # Only use whether the replayResult as classification
+        PRINT_ACTION('\r\n Failed in fetching result ' + res['error'], 0)
+        classification = replayResult
+
     # TODO Supplement YOUR OWN method to get the classification result here
+
     # Use the replayResult when testing censorship
 
     # OR Manually type what this traffic is classified as
     # classify_result = raw_input('Is it classified the same as original replay? "YES" or "NO"?')
 
-    ###### Beginning of asking the replay analyzer for performance difference
-    # permaData = PermaData()
-    # try:
-    #     PRINT_ACTION(str(analyzerI.ask4analysis(permaData.id, permaData.historyCount, configs.get('testID'))), 0 )
-    # except Exception as e:
-    #     PRINT_ACTION('\n\n\n####### COULD NOT ASK FOR ANALYSIS!!!!! #######\n\n\n' + str(e),0)
-    # PRINT_ACTION(replayResult , 0 )
-    #
-    # # ASK the replay analyzer for KS2 result, i.e., analyzerResult
-    # # replayResult is whether the replay finished, used for testing censorship
-    # # Classify_result = (replayResult, analyzerResult)
-    #
-    # # Give 15s for the server to process the result and insert metrics into the database
-    # time.sleep(15)
-    # PRINT_ACTION('Fetching analysis result from the analyzer server',0)
-    # res = analyzerI.getSingleResult(permaData.id, permaData.historyCount, configs.get('testID'))
-    #
-    # # Check whether results are successfully fetched
-    #
-    #
-    # if res['success'] == True:
-    #     # Process result here
-    #     pres = processResult(res['response'])
-    #     if pres == 1:
-    #         PRINT_ACTION('INConclusive Result. Considered as NOT different from Original replay', 0)
-    #         classification = 'Original'
-    #     elif pres == 2:
-    #         PRINT_ACTION('Different from Original replay', 0)
-    #         classification = 'NotOriginal'
-    #     else:
-    #         PRINT_ACTION('NOT Different from Original replay', 0)
-    #         classification = 'Original'
-    # else:
-    #     # Only use whether the replayResult as classification
-    #     PRINT_ACTION('\r\n Failed in fetching result ' + res['error'], 0)
-    #     classification = replayResult
-    ###### End of asking the replay analyzer for performance difference
 
 
-    return classify_result
+    return classification
 
 # This function looks into the regions in question one by one
 # Each suspect region only has less than 4 bytes, filtered by the previous process
@@ -364,7 +353,7 @@ def RPanalysis(PcapDirectory, Side, PacketNum, Length, original):
 
 # This function inform the server to get ready for another replay
 # The last parameter specifies whether we need to bring up the liberate proxy for this replay
-def Replay(PcapDirectory, pacmodify, analyzerI, libProxy = None):
+def Replay(PcapDirectory, pacmodify, analyzerI = None, libProxy = None):
     global Replaycounter
     Replaycounter += 1
     # Repeat the experiment for 10 times, until we get a classification result, otherwise just
@@ -478,24 +467,93 @@ def CompressMeta(Meta):
             CMeta[packetNum] = Meta[packetNum]
     return CMeta
 
-# Get the matching contents used by the classifiers
+def ExtractKeywordServer(clientport, serverQ, Prot, ServerAnalysis):
+    for P in serverQ.keys():
+        if serverQ[P] != {}:
+            Prot = P
+    csp = serverQ[Prot].keys()[0]
+    sMeta = CompressMeta(ServerAnalysis)
+    # Get the keywords that are being matched on
+    MatchingPackets = {}
+    for Pnum in sMeta:
+        keywords = []
+        fields = []
+        field = 'NotHTTP'
+        for Alist in sMeta[Pnum]:
+            start = Alist[0]
+            end = Alist[-1] + 1
+            # We get the keyword from each sub field
+            if Prot == 'udp':
+                response_text = serverQ[Prot][csp][Pnum].payload.decode('hex')
+                keyword = response_text[start : end]
+            else:
+                response_text = serverQ[Prot][csp][Pnum].response_list[0].payload.decode('hex')
+                keyword = serverQ[Prot][csp][Pnum].response_list[0].payload.decode('hex')[start : end]
+                if clientport == '00080':
+                    e = end
+                    s = start
+                    for i in xrange(end, len(response_text) - 1):
+                        if response_text[i: i + 2] == '\r\n':
+                            e = i
+                            break
+
+                    for j in xrange(start, 1, -1):
+                        if response_text[j - 2: j] == '\r\n':
+                            s = j
+                            break
+
+                    if s != 1 and e != len(response_text) - 1:
+                        fullheader = response_text[s:e]
+                        field = fullheader.split(' ')[0]
+            # keywords contains all the keywords matched in this packet
+            keywords.append(keyword)
+            fields.append(field)
+        MatchingPackets[Pnum] = {'fields': fields, 'keywords' : keywords}
+
+    return MatchingPackets
+
 # Extract the corresponding contents for the matching bytes
-def ExtractKeywordClient(clientQ, ClientAnalysis):
+def ExtractKeywordClient(clientport, clientQ, ClientAnalysis):
     cMeta = CompressMeta(ClientAnalysis)
     # Get the keywords that are being matched on
     MatchingPackets = {}
     for Pnum in cMeta:
         keywords = []
+        fields = []
         for Alist in cMeta[Pnum]:
             start = Alist[0]
             end = Alist[-1] + 1
             # We get the keyword from each sub field
-            keyword = clientQ[Pnum].payload.decode('hex')[start : end]
+            request_text = clientQ[Pnum].payload.decode('hex')
+            keyword = request_text[start : end]
+            field = 'NotHTTP'
+            if clientport == '00080':
+                e = end
+                s = start
+                for i in xrange(end, len(request_text) - 1):
+                    if request_text[i : i + 2] == '\r\n':
+                        e = i
+                        break
+
+                for j in xrange(start, 1, -1):
+                    if request_text[j - 2 : j] == '\r\n':
+                        s = j
+                        break
+
+                if s != 1 and e != len(request_text) - 1:
+                    fullheader = request_text[s:e]
+                    field = fullheader.split(' ')[0]
+
             # keywords contains all the keywords matched in this packet
             keywords.append(keyword)
-        MatchingPackets[Pnum] = keywords
-    # We return a dictionary of packet to keywords
-    # e.g. MatchingPackets = {0 : ['GET', 'Host: www.goodexample.com'], 1: ['got to be good']}
+            fields.append(field)
+        MatchingPackets[Pnum] = {'fields': fields, 'keywords' : keywords}
+    # We return a dictionary of packet to keywords and fields
+    # e.g. MatchingPackets = {0: {'keywords': ['GET ', '\r\nHost:', 'nflx'], 'fields': ['GET', '\r\nHost:', 'Host:']}}
+    # The matching contents in packet 0 are 'GET' '\r\nHost:' 'nflx', they are in the fields 'GET', '\r\nHost:' and 'Host:' respectively
+    # We can see the last keyword 'nflx' is mapped to a HTTP header.
+    # For connection other than HTTP, the fields will be 'NotHTTP'
+
     return MatchingPackets
 
 # Probe the location of the middlebox
@@ -624,8 +682,11 @@ def main(args):
         print '\r\n No DPI based differentiation has been found within the first ',numPackets, ' packets being tested, exiting'
         sys.exit()
 
+    # client port is used to determine whether it is HTTP traffic,
+    clientport = csp.split('.')[-1]
     # Liberate proxy takes cKeywords as a parameter
-    cKeywords = ExtractKeywordClient(clientQ, Client)
+    cKeywords = ExtractKeywordClient(clientport, clientQ, Client)
+    # sKeywords = ExtractKeywordServer(clientport, serverQ, Protocol, Server)
     print '\n\t Matching Keywords', cKeywords
 
 

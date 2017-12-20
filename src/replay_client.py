@@ -75,7 +75,7 @@ Exit codes:
 #######################################################################################################
 '''
 
-import sys, commands, socket, time, numpy, threading, select, pickle, Queue
+import sys, commands, socket, time, threading, select, pickle, Queue
 from python_lib import *
 
 DEBUG = 4
@@ -146,7 +146,7 @@ class tcpClient(object):
         # Start running liberateProxy here
         self.sock.connect(self.dst_instance)
         
-    def single_tcp_request_response(self, tcp, send_event, tolerance=100):
+    def single_tcp_request_response(self, tcp, send_event, bytesBuf, bufLock, totalbuff_len, tolerance=100):
         '''
         Steps:
             1- Create the socket if it hasn't been created yet.
@@ -173,7 +173,6 @@ class tcpClient(object):
                                + tcp.payload.partition('\r\n')[2])
             
         try:
-            tcp.payload = tcp.payload.replace('djmcau','djmcao')
             self.sock.sendall(tcp.payload)
             activityQ.put(1)
         except:
@@ -194,6 +193,11 @@ class tcpClient(object):
                 if r:
                     data = self.sock.recv( min(self.buff_size, tcp.response_len-buffer_len) )
                     buffer_len += len(data)
+                    bufLock.acquire()
+                    # print '\r\n SINGLE TCP ACQUIRED',bytesBuf, buffer_len
+                    if bytesBuf[1] == 0:
+                        bytesBuf[1] = buffer_len - bytesBuf[0]
+                    bufLock.release()
                 
                 if tcp.response_len - buffer_len > 0:
                     print '\nBREAKING EARLY:', tcp.response_len - buffer_len, tcp.c_s_pair
@@ -228,9 +232,17 @@ class tcpClient(object):
                     print "\n\nUnexpected error happened 3:", sys.exc_info()[1], tcp.c_s_pair
                     self.event.set()
                     return
-                
+
+                bufLock.acquire()
+                # print '\r\n OUTSIDE TOLERANCE',bytesBuf, buffer_len
+                totalbuff_len[0] += len(data)
+                if bytesBuf[1] == 0 and buffer_len != 0:
+                    bytesBuf[1] = totalbuff_len[0] - bytesBuf[0]
+                    # print '\r\n + PREVIOUSLY RECEIVED, NEW DATA RECEIVED, buffer_len', bytesBuf[0], bytesBuf[1], totalbuff_len[0]
+                bufLock.release()
+
                 buffer_len += len(data)
-            
+
         self.event.set()
 
 class udpClient(object):
@@ -246,6 +258,7 @@ class udpClient(object):
         self.port = str(self.sock.getsockname()[1]).zfill(5)
         
     def send_udp_packet(self, udp, dstAddress):
+        # udp.payload = udp.payload.replace('googlevideo','gaoglevideo')
         self.sock.sendto(udp.payload, dstAddress)
         activityQ.put(1)
         if DEBUG == 2: print "sent:", udp.payload     , 'to', dstAddress, 'from', self.sock.getsockname()
@@ -261,6 +274,11 @@ class Sender(object):
         self.mpacNum = mpacNum
         self.action = action
         self.spec = spec
+        self.bytesBuf = [0,0]
+        self.bufLock = threading.RLock()
+        self.clientXputs = []
+        self.clientDur = []
+        self.totalbuff_len = [0]
 
     def multiReplace(self, payload, regions, rpayload):
         # When randomPayload is '', that means we need to replace payload with the strings stores in regions
@@ -361,6 +379,23 @@ class Sender(object):
 
         return clientQ
 
+    def throughputAnalysis(self, bytesBuf, bufLock):
+
+        for i in xrange(100):
+            time.sleep(0.04)
+            xput = 0
+            bufLock.acquire()
+            # print '\r\n Analysis TCP ACQUIRED',bytesBuf
+            if bytesBuf[1] != 0:
+                bytesIncrease = bytesBuf[1]
+                bytesBuf[0] += bytesIncrease
+                xput = (bytesIncrease/0.04)*8/1000000.0
+                bytesBuf[1] = 0
+                # print '\r\n - PREVIOUSLY RECEIVED, NEW RECEIVED',bytesBuf[0], bytesIncrease, xput
+            bufLock.release()
+            self.clientXputs.append(xput)
+            self.clientDur.append(i*0.04)
+
     def run(self, Q, clientMapping, udpSocketList, udpServerMapping, timing):
         self.timing           = timing
         self.clientMapping    = clientMapping
@@ -376,6 +411,10 @@ class Sender(object):
         # Make changes according to action and spec on the specified packet
             Q = self.cModify(Q)
         progress_bar          = print_progress(len(Q))
+
+        a = threading.Thread(target=self.throughputAnalysis, args=(self.bytesBuf, self.bufLock,))
+        a.start()
+
         for p in Q:
 
             if DEBUG == 4: progress_bar.next()
@@ -404,7 +443,7 @@ class Sender(object):
             client.event.clear()
 
             threads.append(self.nextTCP(client, p))
-            
+
             self.send_event.wait()
             self.send_event.clear()
         
@@ -422,8 +461,8 @@ class Sender(object):
                 time.sleep((self.time_origin + tcp.timestamp) - time.time())
             except:
                 pass
-            
-        t = threading.Thread(target=client.single_tcp_request_response, args=(tcp, self.send_event,))
+
+        t = threading.Thread(target=client.single_tcp_request_response, args=(tcp, self.send_event, self.bytesBuf, self.bufLock, self.totalbuff_len,))
         t.start()
         
         return t
@@ -580,7 +619,9 @@ class SideChannel(object):
         permaData         = PermaData()
         self.id           = permaData.id
         self.historyCount = permaData.historyCount
-        self.send_object(';'.join([self.id, Configs().get('testID'), replayName, str(extraString), str(self.historyCount), str(endOfTest)]))
+        # Added default client realIP to be '127.0.0.1', the client needs to find out whether it is behind a proxy
+        # and what is the proxy IP that used to communicate with server, and send it as the realIP attribute to server
+        self.send_object(';'.join([self.id, Configs().get('testID'), replayName, str(extraString), str(self.historyCount), str(endOfTest), '127.0.0.1','1.0']))
         
         if Configs().get('byExternal') is False:
             permaData.updateHistoryCount()
@@ -648,30 +689,47 @@ class SideChannel(object):
         if we don't wait for confirmation, client will quit before the server does,
         and can result in permission deny by server when doing back2back replays. 
         '''
-        if not jitter:
-            PRINT_ACTION('NoJitter', 1, action=False)
-            self.send_object(';'.join(['NoJitter', id]))
-        
-        else:
-            self.send_object(';'.join(['WillSendClientJitter', id]))
-    
-            sent_jitter_file = Configs().get('jitterFolder') + '/client_sent_jitter_'+ Configs().get('dumpName') +'.txt'
-            rcvd_jitter_file = Configs().get('jitterFolder') + '/client_rcvd_jitter_'+ Configs().get('dumpName') +'.txt'
-            
-            with open(sent_jitter_file, 'w') as f:
-                sent_jitter_hashed = map(lambda j: j[0]+'\t'+str(java_byte_hashcode(j[1])), sent_jitter)
-                f.write('\n'.join(sent_jitter_hashed))
-            
-            with open(rcvd_jitter_file, 'w') as f:
-                rcvd_jitter_hashed = map(lambda j: j[0]+'\t'+str(java_byte_hashcode(j[1])), rcvd_jitter)
-                f.write('\n'.join(rcvd_jitter_hashed))
-                
-            self.send_object(open(sent_jitter_file, 'rb').read())
-            self.send_object(open(rcvd_jitter_file, 'rb').read())
+        # if not jitter:
+        #     PRINT_ACTION('NoJitter', 1, action=False)
+        #     self.send_object(';'.join(['NoJitter', id]))
+        #
+        # else:
+        #     self.send_object(';'.join(['WillSendClientJitter', id]))
+        #
+        #     sent_jitter_file = Configs().get('jitterFolder') + '/client_sent_jitter_'+ Configs().get('dumpName') +'.txt'
+        #     rcvd_jitter_file = Configs().get('jitterFolder') + '/client_rcvd_jitter_'+ Configs().get('dumpName') +'.txt'
+        #
+        #     with open(sent_jitter_file, 'w') as f:
+        #         sent_jitter_hashed = map(lambda j: j[0]+'\t'+str(java_byte_hashcode(j[1])), sent_jitter)
+        #         f.write('\n'.join(sent_jitter_hashed))
+        #
+        #     with open(rcvd_jitter_file, 'w') as f:
+        #         rcvd_jitter_hashed = map(lambda j: j[0]+'\t'+str(java_byte_hashcode(j[1])), rcvd_jitter)
+        #         f.write('\n'.join(rcvd_jitter_hashed))
+        #
+        #     self.send_object(open(sent_jitter_file, 'rb').read())
+        #     self.send_object(open(rcvd_jitter_file, 'rb').read())
+        PRINT_ACTION('NoJitter', 1, action=False)
+        self.send_object('NoJitter')
         
         data = self.receive_object()
         assert(data == 'OK')
         
+        return
+
+    def send_clientAnalysis(self, xput, dur):
+
+        PRINT_ACTION('SENDING CLIENT ANALYSIS', 1, action=False)
+        # self.send_object(';'.join(['NoJitter', id]))
+
+        # print '\r\n XPUT ',xput
+        # print '\r\n DUR',dur
+        data = json.dumps((xput, dur))
+        self.send_object(data)
+
+        data = self.receive_object()
+        assert(data == 'OK')
+
         return
 
     def sendChangeSpec(self, mpacNum, action, spec):
@@ -777,20 +835,13 @@ def load_Q(serialize='pickle', skipTCP=False):
 #       when Prepend : spec[0] is the number of packets to prepend, spec[1] is the length of each packet
 #       when ReplaceR/I : spec is the list of regions that need to be replaced e.g., [(1,3), (4,10)] means byte [1:3] and [4,10] needs to be replaced
 #       when ReplaceW : spec is the map of regions and what to replace e.g., {(1,3):'yo', (4,10):'whatup'}
-def run(configs = Configs(), libProxy = None, pcapdir = None, cmpacNum = -1, caction = None, cspec = None, smpacNum = -1, saction = None, sspec = None):
+def run(configs = Configs(), pcapdir = None, cmpacNum = -1, caction = None, cspec = None, smpacNum = -1, saction = None, sspec = None, testID = '0', byExternal = False, libProxy=None):
     initialSetup()
-
-    # If it is called by 'classifierAnalysis'
-    try :
-        configs.get('byExternal')
-    except KeyError:
-        configs.set('byExternal', False)
-        configs.set('testID', '-1')
+    configs.set('testID' , testID)
+    configs.set('byExternal' , byExternal)
 
     if pcapdir != None:
         configs.set('pcap_folder',pcapdir)
-    testID = int(configs.get('testID'))
-    configs.set('testID', str(testID + 1))
     
     PRINT_ACTION('Server IP address: {}'.format(configs.get('serverInstanceIP')), 0)
     
@@ -817,7 +868,8 @@ def run(configs = Configs(), libProxy = None, pcapdir = None, cmpacNum = -1, cac
             os._exit(3)
     else:
         sideChannel.publicIP = permission[1]
-        PRINT_ACTION('Permission granted. My public IP: {}'.format(sideChannel.publicIP), 1, action=False)
+        bucketNum = permission[2]
+        PRINT_ACTION('Permission granted. My public IP: {}, number of buckets used is : {}'.format(sideChannel.publicIP, bucketNum), 1, action=False)
     PRINT_ACTION('Running iperf test', 0)
     sideChannel.sendIperf()
     
@@ -851,7 +903,6 @@ def run(configs = Configs(), libProxy = None, pcapdir = None, cmpacNum = -1, cac
     # TODO Binary Randomization support for UDP
     PRINT_ACTION('Creating all UDP client sockets', 0)
     udpSocketList = []
-    print '\r\n udpClientPorts', udpClientPorts
     for original_client_port in udpClientPorts:
         clientMapping['udp'][original_client_port] = udpClient()
     PRINT_ACTION('Created {} UDP sockets.'.format(str(len(clientMapping['udp']))), 1, action=False)
@@ -871,7 +922,6 @@ def run(configs = Configs(), libProxy = None, pcapdir = None, cmpacNum = -1, cac
     pNotf.start()
     
     PRINT_ACTION('Running the Receiver process', 0)
-    print '\r\n UDP RECEIVER',udpSocketList
     receiverObj = Receiver()
     pRecv = threading.Thread( target=receiverObj.run, args=(udpSocketList,) )
     pRecv.start()
@@ -930,11 +980,10 @@ def run(configs = Configs(), libProxy = None, pcapdir = None, cmpacNum = -1, cac
     PRINT_ACTION('Telling server done with replaying', 0)
     sideChannel.sendDone(duration)
     
-    PRINT_ACTION('Sending the jitter results on client...', 0)
-    sideChannel.send_jitter(sideChannel.id, senderObj.sent_jitter, receiverObj.rcvd_jitter, jitter=configs.get('jitter'))
-
-    PRINT_ACTION('Receiving results ...', 0)
-    sideChannel.get_result('result.jpg', result=configs.get('result'))
+    # PRINT_ACTION('Sending the jitter results on client...', 0)
+    # sideChannel.send_jitter(sideChannel.id, senderObj.sent_jitter, receiverObj.rcvd_jitter, jitter=configs.get('jitter'))
+    PRINT_ACTION('Sending the analysis results on client...', 0)
+    sideChannel.send_clientAnalysis(senderObj.clientXputs, senderObj.clientDur)
 
     if libProxy != None:
     # Remove iptables rules and stop liberateProxy here
@@ -942,6 +991,9 @@ def run(configs = Configs(), libProxy = None, pcapdir = None, cmpacNum = -1, cac
         subprocess.call('iptables -D OUTPUT -p tcp --dport '+ dport +' -j NFQUEUE --queue-num 1', stdout=subprocess.PIPE , shell=True)
         libProxy.stop()
 
+
+    PRINT_ACTION('Receiving results ...', 0)
+    sideChannel.get_result('result.jpg', result=configs.get('result'))
     
     PRINT_ACTION('Fin', 0)
     PRINT_ACTION('The process took {} seconds'.format(duration), 1, action=False)

@@ -28,7 +28,7 @@ To kill the server:
 
 import gevent.monkey; gevent.monkey.patch_all()
 
-import sys, time, numpy, pickle, atexit, re, json, socket, urllib2, random, base64, string
+import pickle, atexit, re, urllib2, base64, psutil, glob
 from python_lib import *
 try:
     import db as DB
@@ -94,6 +94,7 @@ class ClientObj(object):
         self.targetFolder     = Configs().get('resultsFolder') + '/' + realID + '/'
         self.tcpdumpsFolder   = self.targetFolder + 'tcpdumpsResults/'
         self.jittersFolder    = self.targetFolder + 'jitterResults/'
+        self.clientXputFolder    = self.targetFolder + 'clientXputs/'
         self.smpacNum          = smpacNum
         self.saction           = saction
         self.sspec             = sspec
@@ -111,6 +112,13 @@ class ClientObj(object):
             
             decisionsFolder = self.targetFolder + 'decisions/'
             os.makedirs( decisionsFolder )
+        # This is because the cleaning cron job might remove the tcpdump directory as a whole
+        if not os.path.exists( self.tcpdumpsFolder):
+            os.makedirs( self.tcpdumpsFolder )
+
+        if not os.path.exists( self.clientXputFolder):
+            os.makedirs( self.clientXputFolder )
+
     
     def setDump(self, dumpName):
         self.dumpName = dumpName
@@ -443,22 +451,12 @@ class UDPServer(object):
         #So no two users behind the same NAT can run at the same time 
         id = clientIP
 
-        # Get replayName from all_client, and we can get csp from LUT
-        if id in self.all_clients:
-            # all_clients[id]'s only key is the replayName for this client
-            replayName = self.all_clients[id].keys()[0]
-        else:
-            self.errorlog_q.put((id, 'Unknown Client', 'UDP', str(self.instance)))
-            return
-
         try:
             self.mapping[id][clientPort]
             
         except KeyError:
             try:
-                original_serverPort = self.Qs[replayName].keys()[0]
-                original_clientPort = self.Qs[replayName].values()[0]
-                # replayName, csp = self.LUT['udp'][hash(data)]
+                replayName, csp = self.LUT['udp'][hash(data)]
             except:
                 self.errorlog_q.put((id, 'Unknown packet', 'UDP', str(self.instance)))
                 return
@@ -467,11 +465,14 @@ class UDPServer(object):
                 self.mapping[id] = {}
             self.mapping[id][clientPort] = 1
             self.ports_q.put(('port', id, replayName, clientPort))
-            
-            # if Configs().get('original_ips'):
-            #     gevent.Greenlet.spawn(self.send_Q, self.Qs[replayName][csp], time.time(), client_address, id, replayName)
-            # else:
-            gevent.Greenlet.spawn(self.send_Q, self.Qs[replayName][original_serverPort][original_clientPort], time.time(), client_address, id, replayName)
+
+            original_serverPort  = csp[-5:]
+            original_clientPort  = csp[16:21]
+
+            if Configs().get('original_ips'):
+                gevent.Greenlet.spawn(self.send_Q, self.Qs[replayName][csp], time.time(), client_address, id, replayName)
+            else:
+                gevent.Greenlet.spawn(self.send_Q, self.Qs[replayName][original_serverPort][original_clientPort], time.time(), client_address, id, replayName)
     
     def send_Q(self, Q, time_origin, client_address, id, replayName):
         '''
@@ -605,15 +606,28 @@ class SideChannel(object):
         if data is None: return
         
         data = data.split(';')
+        # realIP, is what the client get by sending 'WhatsmyIP' to the replay server
+        # We use this instead of the IP address of the sidechannel, since the replay might be behind a proxy that changes the IP address
         try:
-            [realID, testID, replayName, extraString, historyCount, endOfTest] = data
+            [realID, testID, replayName, extraString, historyCount, endOfTest, realIP, clientVersion] = data
             if endOfTest.lower() == 'true':
                 endOfTest = True
             else:
                 endOfTest = False
         except ValueError:
-            [realID, testID, replayName, extraString, historyCount] = data
-            endOfTest = True
+            [realID, testID, replayName, extraString, historyCount, endOfTest] = data
+            realIP = clientIP
+            clientVersion = '1.0'
+
+        # Fix cases where the replayName are not in correct format
+        if replayName == 'AmazonAug8':
+            replayName = 'Amazon-Aug8'
+        elif replayName == 'AmazonAug8Random':
+            replayName = 'AmazonRandom-Aug8'
+        elif replayName == 'NetflixSep22':
+            replayName = 'Netflix-Sep22'
+        elif replayName == 'NetflixSep22Random':
+            replayName = 'NetflixRandom-Sep22'
         
         if extraString == '':
             extraString = 'extraString'
@@ -628,7 +642,11 @@ class SideChannel(object):
         #        -if unknown replayName
         #        -if someone else with the same IP is replaying
         LOG_ACTION(logger, 'New client: ' + '\t'.join([clientIP, realID, replayName, testID, extraString, historyCount, str(endOfTest)]), indent=1, action=False, newLine=True)
-        id      = clientIP
+        # If IP sent from client is different than the one we get from sidechannel, there might be a proxy, use the client
+        if realIP == clientIP or realIP == '127.0.0.1':
+            id = clientIP
+        else:
+            id = realIP
         # ClientObj should know whether there is change needed to make on this connection
         dClient = ClientObj(incomingTime, realID, id, clientIP, replayName, testID, historyCount, extraString, connection, smpacNum, saction, sspec)
         dClient.hosts.add(clientIP)
@@ -644,10 +662,30 @@ class SideChannel(object):
             dClient.exceptions = 'UnknownRelplayName'
             self.logger_q.put('\t'.join(dClient.get_info()))
             return
+        #2c- if server is overloaded
+        cpuPercent = psutil.cpu_percent(1)
+        memPercent = psutil.virtual_memory()[2]
+        diskPercent = psutil.disk_usage('/')[3]
+        bytesSent0 = psutil.net_io_counters()[0]
+        time.sleep(1)
+        bytesSent1 = psutil.net_io_counters()[0]
+        upLoad = (bytesSent1 - bytesSent0) * 8/1000000.0
+
+        LOG_ACTION(logger, 'Server Load right now: CPU Usage {}% Memory Usage {}% Disk Usage {}% Upload Bandwidth Usage {}Mbps ***'.format(cpuPercent, memPercent,diskPercent,upLoad))
+
+        # Check cpu, memory and bandwidth usage
+        # If any of these happens: memory > 95%, disk > 95%, bandwidth > 450 Mbps, return 0;3
+        if memPercent > 95 or diskPercent > 95 or upLoad > 450:
+            LOG_ACTION(logger, '*** Server Load too high: CPU Usage {}% Memory Usage {}% Upload Bandwidth Usage {}Mbps ***'.format(cpuPercent, memPercent, upLoad))
+            send_result = self.send_object(connection, '0;3')
+            dClient.exceptions = 'Server Overloaded at : {}'.format(time.strftime('%Y-%b-%d-%H-%M-%S', time.gmtime()))
+            self.logger_q.put('\t'.join(dClient.get_info()))
+            return
+
         # Each client can only run one replay at any time
         # self.admissionCtrl[id] has to be unique
-        #2c- check permission
-        #    if testID in ['NOVPN_1', 'SINGLE']: it's a new test:
+        #2d- check permission
+        #    if testID:
         #        -if another back2back is on file with the same realID: kill it!
         #        -if self.admissionCtrl[id] exists: another user (different realID) with the same IP is on file
         #            -if it is not alive: kill it!
@@ -714,9 +752,9 @@ class SideChannel(object):
             
             g.link(self.side_channel_callback)
             self.greenlets_q.put((g, id, replayName, 'sc', None))
-            
             LOG_ACTION(logger, 'Notifying user know about granted permission: {} - {} - {}'.format(clientIP, realID, testID), indent=2, action=False)
-            send_result = self.send_object(connection, '1;'+clientIP)
+            # Also tells the client what the number of buckets being used now
+            send_result = self.send_object(connection, '1;'+clientIP+';'+str(Configs().get('xputBuckets')))
             LOG_ACTION(logger, 'Done notifying user know about granted permission: {} - {} - {}'.format(clientIP, realID, testID), indent=2, action=False)
         else:
             try:
@@ -724,7 +762,7 @@ class SideChannel(object):
                 LOG_ACTION(logger, '*** NoPermission. You: {} - {} - {}, OnFile: {} - {} - {} ***'.format(clientIP, realID, testID, testOnFile.ip, testOnFile.realID, testOnFile.testID))
             except KeyError:
                 LOG_ACTION(logger, '*** NoPermission. You: {} - {} - {}, OnFile: None ***'.format(clientIP, realID, testID))
-            send_result = self.send_object(connection, '0;2')
+            send_result = self.send_object(connection, '0;2;'+Configs().get('xputBuckets'))
             dClient.exceptions = 'NoPermission'
             self.logger_q.put('\t'.join(dClient.get_info()))
 
@@ -796,17 +834,36 @@ class SideChannel(object):
         dClient.success    = True
         dClient.clientTime = data[1]
         
-        #7- Receive jitter
+        # #7- Receive jitter
+        # data = self.receive_object(connection)
+        # if data is None: return
+        #
+        # data = data.split(';')
+        # if data[0] == 'WillSendClientJitter':
+        #     if not self.get_jitter(connection, dClient.jittersFolder+'/jitter_sent_'+dClient.dumpName+'.txt'): return
+        #     if not self.get_jitter(connection, dClient.jittersFolder+'/jitter_rcvd_'+dClient.dumpName+'.txt'): return
+        #
+        # elif data[0] == 'NoJitter':
+        #     pass
+
+        #7- Receive client throughput info
         data = self.receive_object(connection)
         if data is None: return
-        
-        data = data.split(';')
-        if data[0] == 'WillSendClientJitter':
-            if not self.get_jitter(connection, dClient.jittersFolder+'/jitter_sent_'+dClient.dumpName+'.txt'): return
-            if not self.get_jitter(connection, dClient.jittersFolder+'/jitter_rcvd_'+dClient.dumpName+'.txt'): return
+        if 'NoJitter' not in data:
+            xput, ts = json.loads(data)
+            # The last sampled throughput might be outlier since the intervals can be extremely small
+            xput = xput[:-1]
+            ts = ts[:-1]
 
-        elif data[0] == 'NoJitter':
-            pass
+            resultsFolder = Configs().get('resultsFolder')
+
+            folder          = resultsFolder + '/' +  realID + '/clientXputs/'
+            xputFile = folder + 'Xput_{}_{}_{}.pickle'.format(realID, historyCount, testID)
+
+            try:
+                pickle.dump((xput, ts), open(xputFile, 'w'), 2 )
+            except Exception as e:
+                print e
         
         '''
         It is very important to send this confirmation. Otherwise client exits early and can
@@ -830,7 +887,7 @@ class SideChannel(object):
         elif data[1] == 'No':
             if self.send_object(connection, 'OK') is False: return
         
-        if endOfTest or (testID == 'SINGLE'):
+        if endOfTest or (testID == '1'):
             LOG_ACTION(logger, 'Cleaning inProgress and admissionCtrl for: '+realID, indent=2, action=False)
             id = self.inProgress[realID]
             del self.admissionCtrl[id]
@@ -994,7 +1051,9 @@ class SideChannel(object):
             toWrite = self.logger_q.get()
             replayLogger.info(toWrite)
             if self.db is not None:
-                self.db.insertReplay(toWrite, self.instanceID)
+                res = self.db.insertReplay(toWrite, self.instanceID)
+                if res != True:
+                    self.errorlog_q.put((res))
             else:
                 print 'No DB available!'
     
@@ -1089,7 +1148,7 @@ class SideChannel(object):
             try:
                 dClient = self.all_clients[id][replayName]
             except:
-                LOG_ACTION(logger, 'portCollector cannot find client: '+data, level='EXCEPTION', doPrint=False)
+                LOG_ACTION(logger, 'portCollector cannot find client: '+ id , level='EXCEPTION', doPrint=False)
                 continue
 
             if command == 'port':

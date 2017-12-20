@@ -15,7 +15,7 @@ class DB(object):
         if self.dbLocation == 'local':
             self.host   = 'localhost'
             self.user   = 'root'
-            self.pw     = 'Tr@fficDiff3rentiation'
+            self.pw     = 'password'
             self.dbName = 'ResultsDB'
 
         self._connect()

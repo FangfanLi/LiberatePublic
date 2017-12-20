@@ -100,21 +100,28 @@ def processResult(result):
     ks2Result = float(result['ks2pVal'])
     areaResult = float(result['area_test'])
 
-    # ks2_ratio test is problematic, sometimes does not give the correct result even in the obvious cases, not using it so far
-    # 1.Area test passes and 2.With confidence level ks2Beta that the two distributions are the same
-    # Then there is no differentiation
-    if (areaResult < areaT) and (ks2Result > ks2T):
-        outres = 0
-    # 1.Area test does not pass and 2.With confidence level ks2Beta that the two distributions are not the same
-    # Then there is differentiation
-    elif (areaResult > areaT) and (ks2Result < ks2T):
-        outres = 2
-        # rate = (result['xput_avg_test'] - result['xput_avg_original'])/min(result['xput_avg_original'], result['xput_avg_test'])
-    # Else inconclusive
+    # Trust the KS2 result:
+    if ks2Ratio > ks2Beta:
+        # 1. The CDFs have less than areaT difference in area test and 2.With confidence level ks2T that the two distributions are the same
+        # Then there is no differentiation
+        if (areaResult < areaT) and (ks2Result > ks2T):
+            outres = 0
+        # 1. The CDFs have more than areaT difference in area test and 2.With confidence level ks2T that the two distributions are not the same
+        # Then there is differentiation
+        elif (areaResult > areaT) and (ks2Result < ks2T):
+            outres = 2
+            # rate = (result['xput_avg_test'] - result['xput_avg_original'])/min(result['xput_avg_original'], result['xput_avg_test'])
+        # Else inconclusive
+        else:
+            outres = 1
+            PRINT_ACTION('##### INConclusive Result, area test is' + str(areaResult) + 'ks2 test is ' + str(ks2Result), 0)
+            # rate = (result['xput_avg_test'] - result['xput_avg_original'])/min(result['xput_avg_original'], result['xput_avg_test'])
+    # The KS2 result is not trusted
     else:
-        outres = 1
-        PRINT_ACTION('##### INConclusive Result, area test is' + str(areaResult) + 'ks2 test is ' + str(ks2Result), 0)
-        # rate = (result['xput_avg_test'] - result['xput_avg_original'])/min(result['xput_avg_original'], result['xput_avg_test'])
+        if areaResult > areaT:
+            outres = 2
+        else:
+            outres = 0
 
     return outres
 
@@ -215,23 +222,25 @@ def runReplay(PcapDirectory, pacmodify, analyzerI):
         sspec = Mspec
 
     configs = Configs()
+    testID = int(configs.get('testID'))
+    configs.set('testID', str(testID + 1))
 
     # replay_client.run(configs = configs, pcapdir = PcapDirectory, cmpacNum = cmpacNum, caction = caction, cspec = cspec,
     #                       smpacNum = smpacNum, saction = saction, sspec = sspec)
     try:
         replayResult = replay_client.run(configs = configs, pcapdir = PcapDirectory, cmpacNum = cmpacNum, caction = caction, cspec = cspec,
-                          smpacNum = smpacNum, saction = saction, sspec = sspec)
+                          smpacNum = smpacNum, saction = saction, sspec = sspec, testID=configs.get('testID'), byExternal=True)
     except:
         print '\r\n Error when running replay'
         replayResult = None
 
-    time.sleep(5)
+    time.sleep(10)
     permaData = PermaData()
     try:
         PRINT_ACTION(str(analyzerI.ask4analysis(permaData.id, permaData.historyCount, configs.get('testID'))), 0 )
     except Exception as e:
         PRINT_ACTION('\n\n\n####### COULD NOT ASK FOR ANALYSIS!!!!! #######\n\n\n' + str(e),0)
-    PRINT_ACTION(replayResult , 0 )
+    PRINT_ACTION(str(replayResult) , 0 )
 
     # ASK the replay analyzer for KS2 result, i.e., analyzerResult
     # replayResult is whether the replay finished, used for testing censorship
@@ -266,25 +275,6 @@ def runReplay(PcapDirectory, pacmodify, analyzerI):
 
     # OR Manually type what this traffic is classified as
     # classification = raw_input('Is it classified the same as original replay? "YES" or "NO"?')
-
-    # In our testbed
-    # Run miniterm_m.py, which would read the classification result from middlebox and write it into a file called out.txt
-    # subprocess.call('sudo python miniterm_m.py --cr -b 19200 /dev/ttyS0', stdout=subprocess.PIPE , shell=True)
-    # dport = 80
-    # time.sleep(1)
-    # keyword = ':' + str(dport)
-    # try:
-    #     if os.path.isfile('out.txt'):
-    #         with open('out.txt', 'r') as f:
-    #             for line in f.readlines():
-    #                 if keyword in line:
-    #                     classify_result = line.split(':')[0]
-    #     subprocess.call('sudo rm out.txt', stdout=subprocess.PIPE , shell=True)
-    # except:
-    #     print '\n\t ********Exception when getting classification result!'
-    #     classification = 'Wrong!'
-    #
-    # print '\r\n This replay is ',classify_result
 
 
     return classification
@@ -452,8 +442,7 @@ def CompressMeta(Meta):
     return CMeta
 
 
-def ExtractKeywordServer(serverQ, Prot, ServerAnalysis):
-    Prot = 'tcp'
+def ExtractKeywordServer(clientport, serverQ, Prot, ServerAnalysis):
     for P in serverQ.keys():
         if serverQ[P] != {}:
             Prot = P
@@ -463,64 +452,98 @@ def ExtractKeywordServer(serverQ, Prot, ServerAnalysis):
     MatchingPackets = {}
     for Pnum in sMeta:
         keywords = []
+        fields = []
+        field = 'NotHTTP'
         for Alist in sMeta[Pnum]:
             start = Alist[0]
             end = Alist[-1] + 1
             # We get the keyword from each sub field
             if Prot == 'udp':
-                keyword = serverQ[Prot][csp][Pnum].payload.decode('hex')[start : end]
+                response_text = serverQ[Prot][csp][Pnum].payload.decode('hex')
+                keyword = response_text[start : end]
             else:
+                response_text = serverQ[Prot][csp][Pnum].response_list[0].payload.decode('hex')
                 keyword = serverQ[Prot][csp][Pnum].response_list[0].payload.decode('hex')[start : end]
+                if clientport == '00080':
+                    e = end
+                    s = start
+                    for i in xrange(end, len(response_text) - 1):
+                        if response_text[i: i + 2] == '\r\n':
+                            e = i
+                            break
+
+                    for j in xrange(start, 1, -1):
+                        if response_text[j - 2: j] == '\r\n':
+                            s = j
+                            break
+
+                    if s != 1 and e != len(response_text) - 1:
+                        fullheader = response_text[s:e]
+                        field = fullheader.split(' ')[0]
             # keywords contains all the keywords matched in this packet
             keywords.append(keyword)
-        MatchingPackets[Pnum] = keywords
+            fields.append(field)
+        MatchingPackets[Pnum] = {'fields': fields, 'keywords' : keywords}
 
     return MatchingPackets
 
 # Extract the corresponding contents for the matching bytes
-def ExtractKeywordClient(clientQ, ClientAnalysis):
+def ExtractKeywordClient(clientport, clientQ, ClientAnalysis):
     cMeta = CompressMeta(ClientAnalysis)
     # Get the keywords that are being matched on
     MatchingPackets = {}
     for Pnum in cMeta:
         keywords = []
+        fields = []
         for Alist in cMeta[Pnum]:
             start = Alist[0]
             end = Alist[-1] + 1
             # We get the keyword from each sub field
-            keyword = clientQ[Pnum].payload.decode('hex')[start : end]
+            request_text = clientQ[Pnum].payload.decode('hex')
+            keyword = request_text[start : end]
+            field = 'NotHTTP'
+            if clientport == '00080':
+                e = end
+                s = start
+                for i in xrange(end, len(request_text) - 1):
+                    if request_text[i : i + 2] == '\r\n':
+                        e = i
+                        break
+
+                for j in xrange(start, 1, -1):
+                    if request_text[j - 2 : j] == '\r\n':
+                        s = j
+                        break
+
+                if s != 1 and e != len(request_text) - 1:
+                    fullheader = request_text[s:e]
+                    field = fullheader.split(' ')[0]
+
             # keywords contains all the keywords matched in this packet
             keywords.append(keyword)
-        MatchingPackets[Pnum] = keywords
-    # We return a dictionary of packet to keywords
-    # e.g. MatchingPackets = {0 : ['GET', 'Host: www.goodexample.com'], 1: ['got to be good']}
+            fields.append(field)
+        MatchingPackets[Pnum] = {'fields': fields, 'keywords' : keywords}
+    # We return a dictionary of packet to keywords and fields
+    # e.g. MatchingPackets = {0: {'keywords': ['GET ', '\r\nHost:', 'nflx'], 'fields': ['GET', '\r\nHost:', 'Host:']}}
+    # The matching contents in packet 0 are 'GET' '\r\nHost:' 'nflx', they are in the fields 'GET', '\r\nHost:' and 'Host:' respectively
+    # We can see the last keyword 'nflx' is mapped to a HTTP header.
+    # For connection other than HTTP, the fields will be 'NotHTTP'
+
     return MatchingPackets
 
 
 def setUpConfig(configs):
     configs.set('ask4analysis'     , False)
     configs.set('analyzerPort'     , 56565)
-    configs.set('byExternal', True)
     configs.set('testID', '-1')
     configs.set('areaThreshold', 0.1)
     configs.set('ks2Threshold', 0.05)
-    configs.set('ks2Beta', '0.90')
+    configs.set('ks2Beta', 0.95)
 
     configs.read_args(sys.argv)
     return configs
 
 def main(args):
-
-    # injectionCodes are the modifications we can use for injection
-    injectionCodes = {}
-    IPinjectionCodes = ['IPi1','IPi2','IPi3','IPi4','IPi5','IPi6','IPi7','IPi8','IPi9']
-    injectionCodes['tcp'] = IPinjectionCodes + ['TCPi1','TCPi2','TCPi3','TCPi4','TCPi5']
-    injectionCodes['udp'] = IPinjectionCodes + ['UDPi1','UDPi2','UDPi3']
-    # splitCodes are the modifications we can use for splitting packets
-    splitCodes = {}
-    IPsplitCodes = ['IPs','IPr']
-    splitCodes['tcp'] = IPsplitCodes + ['TCPs','TCPr']
-    splitCodes['udp'] = IPsplitCodes + ['UDPr']
 
     # All the configurations used
     configs = Configs()
@@ -566,6 +589,8 @@ def main(args):
     PRINT_ACTION('Start to replay Original trace',0)
     Classi_Origin = Replay(PcapDirectory, nomodify, analyzerI)
 
+    print '\r\n %%%%%%%%%% JUST FINISHED ORIGINAL REPLAY'
+    time.sleep(20)
     # Load the randomized trace and perform a replay to check whether DPI based classification
     PRINT_ACTION('Start to replay Randomized trace',0)
     Classi_Random = Replay(PcapDirectory[:-1] + 'Random/', nomodify, analyzerI)
@@ -588,11 +613,11 @@ def main(args):
     # # If no Client Side matching content can be found, abandon, since we can not evade classification then
     # DPI = False
     # for analysis in Client:
+    #     If any of the client packets has matching field, we can run liberate
     #     if Client[analysis][0] == 'DPI based differentiation, matching regions:':
     #         DPI = True
     # #
     # for analysis in Server:
-    #     # If any of the client packets has matching field, we can run liberate
     #     if Server[analysis][0] == 'DPI based differentiation, matching regions:':
     #         DPI = True
     # #
@@ -601,8 +626,11 @@ def main(args):
     #     print '\r\n No DPI based differentiation has been found within the first ',numPackets, ' packets being tested, exiting'
     #     sys.exit()
     # # #
-    # cKeywords = ExtractKeywordClient(clientQ, Client)
-    # sKeywords = ExtractKeywordServer(serverQ, Protocol, Server)
+    # client port is used to determine whether it is HTTP traffic,
+    # the script parses HTTP request to determine the corresponding fields of the keywords
+    # clientport = csp.split('.')[-1]
+    # cKeywords = ExtractKeywordClient(clientport, clientQ, Client)
+    # sKeywords = ExtractKeywordServer(clientport, serverQ, Protocol, Server)
     # print '\n\t Client side Matching Keywords',cKeywords
     # print '\n\t Server side Matching Keywords',sKeywords
 
